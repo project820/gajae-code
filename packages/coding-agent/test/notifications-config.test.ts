@@ -36,6 +36,10 @@ const BASE_CFG: NotificationConfig = {
 	},
 	redact: false,
 	verbosity: "lean",
+	richFinal: {
+		enabled: false,
+		topicId: undefined,
+	},
 	idleTimeoutMs: 60000,
 };
 
@@ -83,6 +87,10 @@ describe("notifications config", () => {
 			},
 			redact: true,
 			verbosity: "lean",
+			richFinal: {
+				enabled: false,
+				topicId: undefined,
+			},
 			idleTimeoutMs: 1234,
 		});
 	});

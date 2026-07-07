@@ -38,6 +38,8 @@ export interface ThreadedSend {
 	 * message. Set for streamed turn frames so live + finalized share one message.
 	 */
 	editable?: boolean;
+	/** Rich final-answer markdown (raw). Delivery marker derived ONLY from a frame's `finalAnswer` bit; never inferred from `phase`. */
+	richMarkdown?: string;
 }
 
 interface ThreadedFrame {
@@ -58,6 +60,7 @@ interface ThreadedFrame {
 	cwd?: unknown;
 	// turn_stream
 	phase?: unknown;
+	finalAnswer?: boolean;
 	text?: unknown;
 	messageRef?: unknown;
 	// image_attachment / file_attachment
@@ -156,6 +159,7 @@ export function renderThreadedFrame(frame: ThreadedFrame): ThreadedSend | undefi
 				text,
 				coalesceKey,
 				editable: coalesceKey !== undefined,
+				richMarkdown: frame.finalAnswer === true ? raw : undefined,
 			};
 		}
 		case "image_attachment": {

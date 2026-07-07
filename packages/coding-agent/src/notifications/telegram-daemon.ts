@@ -44,6 +44,7 @@ import {
 import { NotificationOperatorRuntime, OperatorBackoffPolicy, OperatorEventRouter } from "./operator-runtime";
 import { RateLimitPool } from "./rate-limit-pool";
 import { listRecentSessions } from "./recent-activity";
+import { deliverRichWithFallback, shouldPromoteRich } from "./rich-render";
 import {
 	type AliasTable,
 	buildActionMessage,
@@ -843,6 +844,8 @@ export interface TelegramDaemonOptions {
 	 * default applies (e.g. lifecycle control disabled), no control server starts.
 	 */
 	createLifecycleControlServer?: LifecycleControlServerFactory | null;
+	/** Opt-in rich final-answer promotion (off by default; see rich-render.ts). */
+	richFinal?: { enabled: boolean; topicId?: string };
 }
 
 interface SessionSocket {
@@ -1841,56 +1844,88 @@ export class TelegramNotificationDaemon {
 						parse_mode: TELEGRAM_PARSE_MODE,
 					});
 				} else if (send.text) {
-					const chunks = splitTelegramHtml(send.text);
-					const existingId = editKey ? this.liveMessages.get(editKey) : undefined;
-					if (editKey && existingId !== undefined && chunks.length === 1) {
-						// In-place edit of the streamed message. An unchanged edit is
-						// rejected by Telegram ("message is not modified") and swallowed.
-						await this.botApi.call("editMessageText", {
-							chat_id: this.opts.chatId,
-							message_id: existingId,
-							text: chunks[0],
-							parse_mode: TELEGRAM_PARSE_MODE,
-						});
+					// Rich pre-branch: promote the distinct final answer to a fresh
+					// sendRichMessage when opted in + matched to the rich-test topic.
+					// Off/miss falls through to the unchanged upstream edit/send path,
+					// so default behavior is byte-identical.
+					if (
+						shouldPromoteRich({
+							enabled: this.opts.richFinal?.enabled,
+							richTopicId: this.opts.richFinal?.topicId,
+							topicId,
+							send,
+						})
+					) {
+						const sendHtmlFallback = async () => {
+							for (const text of splitTelegramHtml(send.text!)) {
+								await this.botApi.call("sendMessage", {
+									chat_id: this.opts.chatId,
+									...threadField,
+									text,
+									parse_mode: TELEGRAM_PARSE_MODE,
+								});
+							}
+						};
+						await deliverRichWithFallback(
+							this.botApi,
+							{ chat_id: this.opts.chatId, ...threadField },
+							send,
+							sendHtmlFallback,
+							logger,
+						);
 					} else {
-						// A single granted slot MUST map to a single Telegram send. When the
-						// rendered text splits into multiple chunks (e.g. a long finalized
-						// turn raised via GJC_NOTIFICATIONS_TURN_MAX), deliver the first
-						// chunk on this token and re-submit the remaining chunks as their
-						// own pool items so each consumes a token on a later drain.
-						// Otherwise one frame would fan out into many sends against a single
-						// slot, bypassing the per-chat rate-limit / fairness invariant.
-						const res = (await this.botApi.call("sendMessage", {
-							chat_id: this.opts.chatId,
-							...threadField,
-							text: chunks[0]!,
-							parse_mode: TELEGRAM_PARSE_MODE,
-						})) as { result?: { message_id?: number } };
-						for (let i = 1; i < chunks.length; i++) {
-							// Continuation chunks are fresh, non-editable text sends: no
-							// coalesce key (they neither replace nor are replaced by other
-							// frames) and no media payload.
-							this.pool.submit({
-								sessionId: item.sessionId,
-								lane: item.lane,
-								payload: {
-									send: {
-										...send,
-										method: "sendMessage",
-										text: chunks[i]!,
-										editable: false,
-										coalesceKey: undefined,
-										photoBase64: undefined,
-										documentBase64: undefined,
-									},
-									topicId,
-								},
+						const chunks = splitTelegramHtml(send.text);
+						const existingId = editKey ? this.liveMessages.get(editKey) : undefined;
+						if (editKey && existingId !== undefined && chunks.length === 1) {
+							// In-place edit of the streamed message. An unchanged edit is
+							// rejected by Telegram ("message is not modified") and swallowed.
+							await this.botApi.call("editMessageText", {
+								chat_id: this.opts.chatId,
+								message_id: existingId,
+								text: chunks[0],
+								parse_mode: TELEGRAM_PARSE_MODE,
 							});
+						} else {
+							// A single granted slot MUST map to a single Telegram send. When the
+							// rendered text splits into multiple chunks (e.g. a long finalized
+							// turn raised via GJC_NOTIFICATIONS_TURN_MAX), deliver the first
+							// chunk on this token and re-submit the remaining chunks as their
+							// own pool items so each consumes a token on a later drain.
+							// Otherwise one frame would fan out into many sends against a single
+							// slot, bypassing the per-chat rate-limit / fairness invariant.
+							const res = (await this.botApi.call("sendMessage", {
+								chat_id: this.opts.chatId,
+								...threadField,
+								text: chunks[0]!,
+								parse_mode: TELEGRAM_PARSE_MODE,
+							})) as { result?: { message_id?: number } };
+							for (let i = 1; i < chunks.length; i++) {
+								// Continuation chunks are fresh, non-editable text sends: no
+								// coalesce key (they neither replace nor are replaced by other
+								// frames) and no media payload.
+								this.pool.submit({
+									sessionId: item.sessionId,
+									lane: item.lane,
+									payload: {
+										send: {
+											...send,
+											method: "sendMessage",
+											text: chunks[i]!,
+											editable: false,
+											coalesceKey: undefined,
+											photoBase64: undefined,
+											documentBase64: undefined,
+										},
+										topicId,
+									},
+								});
+							}
+							const firstMessageId = res?.result?.message_id;
+							if (editKey && ckey !== undefined && firstMessageId !== undefined) {
+								this.recordLiveMessage(item.sessionId, ckey, firstMessageId);
+							}
 						}
-						const firstMessageId = res?.result?.message_id;
-						if (editKey && ckey !== undefined && firstMessageId !== undefined) {
-							this.recordLiveMessage(item.sessionId, ckey, firstMessageId);
-						}
+					}
 					}
 				}
 			} catch {

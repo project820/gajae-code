@@ -383,6 +383,7 @@ const defaultConfig: NotificationConfig = {
 	redact: false,
 	verbosity: "lean",
 	idleTimeoutMs: 60_000,
+	richFinal: { enabled: false, topicId: undefined },
 };
 
 export function notificationsEnabled(): boolean {
@@ -1093,7 +1094,7 @@ export function createNotificationsExtension(api: ExtensionAPI, options: { setti
 	// rate-limit pool before sending to Telegram.
 	// Push the in-flight turn's assistant text as a finalized turn_stream, deduped
 	// against what was already flushed for this turn (the pre-ask lead-in).
-	const flushTurnText = (rt: SessionRuntime, id: string, text: string | undefined): void => {
+	const flushTurnText = (rt: SessionRuntime, id: string, text: string | undefined, finalAnswer: boolean): void => {
 		if (!text || text === rt.preAskFlushedText) return;
 		rt.preAskFlushedText = text;
 		try {
@@ -1102,6 +1103,7 @@ export function createNotificationsExtension(api: ExtensionAPI, options: { setti
 					type: "turn_stream",
 					sessionId: id,
 					phase: "finalized",
+					finalAnswer,
 					text,
 					...(rt.liveRef ? { messageRef: rt.liveRef } : {}),
 				}),
@@ -1122,7 +1124,7 @@ export function createNotificationsExtension(api: ExtensionAPI, options: { setti
 		const id = sessionId(ctx);
 		const rt = runtimes.get(id);
 		if (!rt || rt.redact) return;
-		flushTurnText(rt, id, rt.currentTurnText);
+		flushTurnText(rt, id, rt.currentTurnText, false);
 	});
 
 	api.on("turn_end", (event, ctx) => {
@@ -1130,7 +1132,7 @@ export function createNotificationsExtension(api: ExtensionAPI, options: { setti
 		const rt = runtimes.get(id);
 		if (!rt) return;
 		const text = rt.redact ? undefined : summaryFromMessage(event.message, turnTextMax());
-		if (text) flushTurnText(rt, id, text);
+		if (text) flushTurnText(rt, id, text, true);
 		// Reset per-turn streaming state so the next turn starts fresh and a later
 		// turn with identical text is not falsely deduped.
 		rt.currentTurnText = undefined;

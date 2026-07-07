@@ -16,6 +16,10 @@ export interface NotificationConfig {
 	redact: boolean;
 	verbosity: "lean" | "verbose";
 	idleTimeoutMs: number;
+	richFinal: {
+		enabled: boolean;
+		topicId?: string;
+	};
 }
 
 /** Read typed config from Settings. */
@@ -35,6 +39,10 @@ export function getNotificationConfig(settings: Settings): NotificationConfig {
 		redact: settings.get("notifications.redact"),
 		verbosity: settings.get("notifications.verbosity") === "verbose" ? "verbose" : "lean",
 		idleTimeoutMs: settings.get("notifications.daemon.idleTimeoutMs"),
+		richFinal: {
+			enabled: settings.get("notifications.telegram.richFinal.enabled"),
+			topicId: settings.get("notifications.telegram.richFinal.topicId"),
+		},
 	};
 }
 

@@ -64,6 +64,10 @@ export function createLightweightDaemonSettings(input: {
 				case "notifications.slack.botToken":
 				case "notifications.slack.channelId":
 					return asString(value);
+				case "notifications.telegram.richFinal.enabled":
+					return asBoolean(value, false);
+				case "notifications.telegram.richFinal.topicId":
+					return asString(value);
 				case "notifications.redact":
 					return asBoolean(value, false);
 				case "notifications.verbosity":
@@ -156,6 +160,7 @@ export async function runDaemonInternal(argv: string[], deps: RunDaemonInternalD
 		botToken: cfg.botToken,
 		chatId: cfg.chatId,
 		idleTimeoutMs: cfg.idleTimeoutMs,
+		richFinal: cfg.richFinal,
 		pid: deps.processPid ?? process.pid,
 		control: {
 			shouldStop: async owner => {
