@@ -12,6 +12,23 @@
 import type { BotApi } from "./telegram-daemon";
 import type { ThreadedSend } from "./threaded-render";
 
+/**
+ * Telegram's hard per-message character ceiling (4096). Surfaced here purely as
+ * documentation and a marker for a future native rich-message splitter — it is
+ * intentionally NON-BEHAVIORAL and MUST stay that way: nothing in the rich path
+ * branches on this value.
+ *
+ * Overflow is already safe without it. The production final-answer text is capped
+ * at 3500 chars upstream (`summaryFromMessage(..., 3500)`), so a promoted
+ * `sendRichMessage` never approaches this ceiling; and if the Bot API ever rejects
+ * an oversized rich payload it returns `{ ok: false }`, which
+ * `deliverRichWithFallback` (below) turns into the chunked HTML `splitTelegramHtml`
+ * fallback (each chunk ≤ TELEGRAM_MESSAGE_LIMIT). This constant only marks where a
+ * future rich splitter would read its ceiling; wiring it into a branch would change
+ * byte-for-byte behavior and is out of scope.
+ */
+export const RICH_MESSAGE_LIMIT = 4096;
+
 /** Wrap raw markdown in the `sendRichMessage` request payload shape. */
 export function buildRichMessage(raw: string): { rich_message: { markdown: string } } {
 	return { rich_message: { markdown: raw } };

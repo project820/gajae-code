@@ -3233,3 +3233,92 @@ describe("telegram daemon rich final-answer promotion (Rev 3 verification)", () 
 		expect(sends.every(c => c.body.text.length <= TELEGRAM_MESSAGE_LIMIT)).toBe(true);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// G006: rich overflow boundary. Production caps the final answer at 3500 chars
+// (summaryFromMessage(..., 3500)), so a promoted sendRichMessage never overflows
+// under normal traffic and RICH_MESSAGE_LIMIT (rich-render.ts) stays a purely
+// non-behavioral marker. These tests pin the defended-but-prod-unreachable case:
+// an oversized (4096+) rich payload the Bot API rejects with {ok:false} MUST
+// degrade to the chunked HTML splitTelegramHtml fallback — N chunks, each
+// <= TELEGRAM_MESSAGE_LIMIT, with exactly one diagnostic warn — while normal
+// (<= limit) traffic stays a single send. Purely additive: no existing test case
+// is modified.
+// ---------------------------------------------------------------------------
+describe("telegram daemon rich overflow boundary (G006)", () => {
+	test("(g) rich {ok:false} on a 4096+ payload falls back to N HTML chunks, each <= TELEGRAM_MESSAGE_LIMIT", async () => {
+		const raw = "D".repeat(9000);
+		const html = markdownToTelegramHtml(raw);
+		const chunks = splitTelegramHtml(html);
+		expect(html.length).toBeGreaterThan(TELEGRAM_MESSAGE_LIMIT); // genuine 4096+ overflow
+		expect(chunks.length).toBeGreaterThan(1); // must actually split into multiple messages
+
+		const bot = new RichFakeBotApi();
+		bot.richBehavior = "ok_false";
+		const daemon = makeRichDaemon(bot, { enabled: true, topicId: "555" });
+		await driveFinalizedTurn(daemon, bot, richSession(), raw);
+
+		// Rich attempted once, then the REAL daemon sendHtmlFallback closure runs.
+		expect(countMethod(bot, "sendRichMessage")).toBe(1);
+		const sends = bot.calls.filter(c => c.method === "sendMessage");
+		expect(sends).toHaveLength(chunks.length);
+		expect(sends.map(c => c.body.text)).toEqual(chunks); // no content dropped
+		expect(sends.every(c => c.body.text.length <= TELEGRAM_MESSAGE_LIMIT)).toBe(true);
+		expect(sends.every(c => c.body.message_thread_id === 555 && c.body.parse_mode === TELEGRAM_PARSE_MODE)).toBe(true);
+	});
+
+	test("(g) rich {ok:false} at 4096+ overflow warns exactly once and runs the chunked HTML fallback once", async () => {
+		const raw = "E".repeat(9000);
+		const html = markdownToTelegramHtml(raw);
+		const chunks = splitTelegramHtml(html);
+		expect(html.length).toBeGreaterThan(TELEGRAM_MESSAGE_LIMIT);
+		expect(chunks.length).toBeGreaterThan(1);
+
+		const bot = new RichFakeBotApi();
+		bot.richBehavior = "ok_false";
+		const send = { method: "sendMessage", lane: "finalized", text: html, richMarkdown: raw } as any;
+		const base = { chat_id: "42", message_thread_id: 555 };
+		const warns: string[] = [];
+		let fallbacks = 0;
+		// Mirror the daemon's sendHtmlFallback closure (telegram-daemon.ts) verbatim.
+		const sendHtmlFallback = async () => {
+			fallbacks++;
+			for (const text of splitTelegramHtml(send.text)) {
+				await bot.call("sendMessage", {
+					chat_id: base.chat_id,
+					message_thread_id: base.message_thread_id,
+					text,
+					parse_mode: TELEGRAM_PARSE_MODE,
+				});
+			}
+		};
+		await deliverRichWithFallback(bot as any, base, send, sendHtmlFallback, { warn: m => warns.push(m) });
+
+		expect(countMethod(bot, "sendRichMessage")).toBe(1);
+		expect(fallbacks).toBe(1); // fallback invoked exactly once for the whole overflow
+		expect(warns).toHaveLength(1); // one diagnostic, NOT one per chunk
+		expect(warns[0]).toContain("sendRichMessage failed");
+		const sends = bot.calls.filter(c => c.method === "sendMessage");
+		expect(sends).toHaveLength(chunks.length);
+		expect(sends.map(c => c.body.text)).toEqual(chunks);
+		expect(sends.every(c => c.body.text.length <= TELEGRAM_MESSAGE_LIMIT)).toBe(true);
+	});
+
+	test("(g) normal-length (<= limit) traffic is unchanged: promoted -> one rich send; off -> one HTML send", async () => {
+		const raw = "A concise final answer well under the Telegram limit.";
+		expect(markdownToTelegramHtml(raw).length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT); // no overflow
+
+		// Promoted + ok:true -> exactly one sendRichMessage, and NO HTML fallback/split.
+		const onBot = new RichFakeBotApi();
+		await driveFinalizedTurn(makeRichDaemon(onBot, { enabled: true, topicId: "555" }), onBot, richSession(), raw);
+		expect(countMethod(onBot, "sendRichMessage")).toBe(1);
+		expect(countMethod(onBot, "sendMessage")).toBe(0);
+
+		// Off -> the unchanged single HTML sendMessage (no rich, no split).
+		const offBot = new RichFakeBotApi();
+		await driveFinalizedTurn(makeRichDaemon(offBot, { enabled: false, topicId: "555" }), offBot, richSession(), raw);
+		expect(countMethod(offBot, "sendRichMessage")).toBe(0);
+		expect(countMethod(offBot, "sendMessage")).toBe(1);
+		expect(findMethod(offBot, "sendMessage")!.body.text).toBe(markdownToTelegramHtml(raw));
+	});
+});
