@@ -44,6 +44,7 @@ import {
 import { NotificationOperatorRuntime, OperatorBackoffPolicy, OperatorEventRouter } from "./operator-runtime";
 import { RateLimitPool } from "./rate-limit-pool";
 import { listRecentSessions } from "./recent-activity";
+import { ReplySentStore } from "./reply-sent-store";
 import { deliverRichWithFallback, shouldPromoteRich } from "./rich-render";
 import {
 	type AliasTable,
@@ -886,6 +887,8 @@ export class TelegramNotificationDaemon {
 	private readonly pool: RateLimitPool<{ send: ThreadedSend; topicId?: string }>;
 	private readonly poller: TelegramUpdatePoller;
 	private readonly dispatchState = new TelegramEventDispatchState();
+	/** Original markdown of rich messages we sent (chat+message_id), for restoring reply context on inbound replies. */
+	private readonly replyStore: ReplySentStore;
 	/** Identity-bearing sessions by repo/branch surface, used to avoid transient duplicate topics. */
 	private readonly topicOwnerByIdentity = new Map<string, string>();
 	/** Non-identity frames held until identity creates the correct thread. */
@@ -1245,6 +1248,7 @@ export class TelegramNotificationDaemon {
 
 	constructor(private readonly opts: TelegramDaemonOptions) {
 		this.fsImpl = opts.fs ?? nodeFs;
+		this.replyStore = new ReplySentStore({ agentDir: opts.settings.getAgentDir(), fs: opts.fs });
 		this.aliasTable = createAliasTable();
 		this.botApi =
 			opts.botApi ??
@@ -1866,13 +1870,22 @@ export class TelegramNotificationDaemon {
 								});
 							}
 						};
-						await deliverRichWithFallback(
+						const richMessageId = await deliverRichWithFallback(
 							this.botApi,
 							{ chat_id: this.opts.chatId, ...threadField },
 							send,
 							sendHtmlFallback,
 							logger,
 						);
+						// Index the sent rich message so an inbound reply to it can restore
+						// the original markdown as context (Telegram does not echo it back).
+						if (richMessageId !== undefined) {
+							await this.replyStore.record({
+								chatId: this.opts.chatId,
+								messageId: richMessageId,
+								text: send.richMarkdown!,
+							});
+						}
 					} else {
 						const chunks = splitTelegramHtml(send.text);
 						const existingId = editKey ? this.liveMessages.get(editKey) : undefined;
@@ -2246,7 +2259,17 @@ export class TelegramNotificationDaemon {
 					const images = attachmentResult?.images ?? [];
 					const fileNotes = attachmentResult?.fileNotes ?? [];
 					const hasMedia = images.length > 0 || fileNotes.length > 0;
-					const injectedText = [inbound.text, ...fileNotes].filter(Boolean).join("\n");
+					const baseInjectedText = [inbound.text, ...fileNotes].filter(Boolean).join("\n");
+					// A reply to a rich message we sent (not an ask route) loses its original
+					// text: Telegram does not echo it in reply_to_message. Restore it from the
+					// reply index as a labeled context prefix; a miss leaves the turn unchanged.
+					const repliedOriginal =
+						typeof replyTo === "number"
+							? this.replyStore.lookup({ chatId: this.opts.chatId, messageId: replyTo })
+							: undefined;
+					const injectedText = repliedOriginal
+						? `> 답장 대상 원문:\n${repliedOriginal}\n\n${baseInjectedText}`
+						: baseInjectedText;
 					const cfg = hasMedia ? undefined : parseInThreadConfigCommand(inbound.text);
 					// A plain (non-config) message while an ask is pending for this session
 					// answers that ask as free-input — instead of starting a new user turn.
@@ -2356,6 +2379,7 @@ export class TelegramNotificationDaemon {
 			await this.loadAliases();
 			await this.loadTopics();
 			await this.loadSeenUpdateIds();
+			await this.replyStore.load();
 			await this.runScan();
 			// Owner-only: start the session-lifecycle control server now that
 			// ownership is confirmed (singleton-safe). Best-effort; degrades.

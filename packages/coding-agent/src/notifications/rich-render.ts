@@ -50,6 +50,11 @@ export function shouldPromoteRich(input: {
  * returns `res.json()` for JSON methods, so `ok:false` does not throw). On
  * failure exactly one diagnostic is logged before the fallback runs; on success
  * the fallback never runs.
+ *
+ * Returns the sent message's `message_id` on success (when the response carries
+ * one), otherwise `undefined` — including every failure/fallback path and a
+ * success whose response omits `result.message_id`. Callers that ignore the
+ * return value are unaffected.
  */
 export async function deliverRichWithFallback(
 	botApi: BotApi,
@@ -57,18 +62,23 @@ export async function deliverRichWithFallback(
 	send: ThreadedSend,
 	fallbackDeliver: () => Promise<void>,
 	log?: { warn(msg: string): void },
-): Promise<void> {
+): Promise<number | undefined> {
 	let failure: string | undefined;
+	let messageId: number | undefined;
 	try {
 		const res = await botApi.call("sendRichMessage", { ...base, ...buildRichMessage(send.richMarkdown!) });
 		if (res !== null && typeof res === "object" && (res as { ok?: unknown }).ok === false) {
 			const description = (res as { description?: unknown }).description;
 			failure = typeof description === "string" && description.length > 0 ? description : "ok:false";
+		} else {
+			const candidate = (res as { result?: { message_id?: unknown } } | null)?.result?.message_id;
+			if (typeof candidate === "number") messageId = candidate;
 		}
 	} catch (err) {
 		failure = err instanceof Error ? err.message : String(err);
 	}
-	if (failure === undefined) return;
+	if (failure === undefined) return messageId;
 	log?.warn(`notifications: sendRichMessage failed (${failure}); falling back to HTML`);
 	await fallbackDeliver();
+	return undefined;
 }
