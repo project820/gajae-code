@@ -40,6 +40,8 @@ export interface ThreadedSend {
 	editable?: boolean;
 	/** Rich final-answer markdown (raw). Delivery marker derived ONLY from a frame's `finalAnswer` bit; never inferred from `phase`. */
 	richMarkdown?: string;
+	/** Live-turn raw markdown for opt-in draft streaming (set ONLY on non-finalized turn frames; never triggers rich-final promotion, which requires `lane === "finalized"`). */
+	richDraftMarkdown?: string;
 }
 
 interface ThreadedFrame {
@@ -160,6 +162,10 @@ export function renderThreadedFrame(frame: ThreadedFrame): ThreadedSend | undefi
 				coalesceKey,
 				editable: coalesceKey !== undefined,
 				richMarkdown: frame.finalAnswer === true ? raw : undefined,
+				// Live-only draft marker: carries the RAW markdown on non-finalized turn
+				// frames so the opt-in draft gate has the source. It never arms rich-final
+				// promotion (shouldPromoteRich requires lane === "finalized").
+				richDraftMarkdown: finalized ? undefined : raw,
 			};
 		}
 		case "image_attachment": {

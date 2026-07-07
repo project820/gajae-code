@@ -384,6 +384,7 @@ const defaultConfig: NotificationConfig = {
 	verbosity: "lean",
 	idleTimeoutMs: 60_000,
 	richFinal: { enabled: false, topicId: undefined },
+	richDraft: { enabled: false },
 };
 
 export function notificationsEnabled(): boolean {

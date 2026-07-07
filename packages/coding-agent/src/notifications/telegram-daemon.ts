@@ -45,6 +45,7 @@ import { NotificationOperatorRuntime, OperatorBackoffPolicy, OperatorEventRouter
 import { RateLimitPool } from "./rate-limit-pool";
 import { listRecentSessions } from "./recent-activity";
 import { ReplySentStore } from "./reply-sent-store";
+import { DraftStreamState, deliverDraft, shouldStreamDraft } from "./rich-draft";
 import { deliverRichWithFallback, shouldPromoteRich } from "./rich-render";
 import {
 	type AliasTable,
@@ -847,6 +848,8 @@ export interface TelegramDaemonOptions {
 	createLifecycleControlServer?: LifecycleControlServerFactory | null;
 	/** Opt-in rich final-answer promotion (off by default; see rich-render.ts). */
 	richFinal?: { enabled: boolean; topicId?: string };
+	/** Opt-in rich-draft streaming of live turn previews (off by default; reuses richFinal.topicId scope; see rich-draft.ts). */
+	richDraft?: { enabled: boolean };
 }
 
 interface SessionSocket {
@@ -889,6 +892,8 @@ export class TelegramNotificationDaemon {
 	private readonly dispatchState = new TelegramEventDispatchState();
 	/** Original markdown of rich messages we sent (chat+message_id), for restoring reply context on inbound replies. */
 	private readonly replyStore: ReplySentStore;
+	/** Per-session debounce + monotonic draft-id state for opt-in draft streaming. */
+	private readonly draftStream = new DraftStreamState();
 	/** Identity-bearing sessions by repo/branch surface, used to avoid transient duplicate topics. */
 	private readonly topicOwnerByIdentity = new Map<string, string>();
 	/** Non-identity frames held until identity creates the correct thread. */
@@ -1827,6 +1832,35 @@ export class TelegramNotificationDaemon {
 			const editKey = ckey !== undefined ? `${item.sessionId}:${ckey}` : undefined;
 			if (item.lane === "live" && editKey && finalizedKeys.has(editKey)) continue;
 			try {
+				// Draft streaming (opt-in, off by default): stream a live turn frame as a
+				// best-effort rich-draft preview on the rich-test topic, debounced to
+				// >=1.5s per session through this same rate-limited drain; a finalized
+				// frame ends the turn's draft window. Entirely inert when richDraft is
+				// off (the enabled gate / shouldStreamDraft fail closed), so the off-state
+				// HTML and rich-final request bodies stay byte-identical.
+				if (this.opts.richDraft?.enabled === true) {
+					if (send.lane === "finalized" && send.method === "sendMessage") {
+						this.draftStream.reset(item.sessionId);
+					} else if (
+						shouldStreamDraft({
+							enabled: this.opts.richDraft.enabled,
+							richTopicId: this.opts.richFinal?.topicId,
+							topicId,
+							send,
+						})
+					) {
+						const draftId = this.draftStream.tryClaim(item.sessionId, this.opts.now?.() ?? Date.now());
+						if (draftId !== undefined) {
+							await deliverDraft(
+								this.botApi,
+								{ chat_id: this.opts.chatId, ...threadField },
+								draftId,
+								send.richDraftMarkdown!,
+								logger,
+							);
+						}
+					}
+				}
 				if (send.method === "sendPhoto" && send.photoBase64) {
 					// Real photo upload (the default botApi multiparts base64 -> file).
 					await this.botApi.call("sendPhoto", {

@@ -20,6 +20,9 @@ export interface NotificationConfig {
 		enabled: boolean;
 		topicId?: string;
 	};
+	richDraft: {
+		enabled: boolean;
+	};
 }
 
 /** Read typed config from Settings. */
@@ -42,6 +45,9 @@ export function getNotificationConfig(settings: Settings): NotificationConfig {
 		richFinal: {
 			enabled: settings.get("notifications.telegram.richFinal.enabled"),
 			topicId: settings.get("notifications.telegram.richFinal.topicId"),
+		},
+		richDraft: {
+			enabled: settings.get("notifications.telegram.richDraft.enabled"),
 		},
 	};
 }

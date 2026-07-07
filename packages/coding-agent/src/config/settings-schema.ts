@@ -260,6 +260,7 @@ export const SETTINGS_SCHEMA = {
 	"notifications.telegram.chatId": { type: "string", default: undefined },
 	"notifications.telegram.richFinal.enabled": { type: "boolean", default: false },
 	"notifications.telegram.richFinal.topicId": { type: "string", default: undefined },
+	"notifications.telegram.richDraft.enabled": { type: "boolean", default: false },
 	"notifications.discord.botToken": { type: "string", default: undefined },
 	"notifications.discord.channelId": { type: "string", default: undefined },
 	"notifications.slack.botToken": { type: "string", default: undefined },
@@ -3413,6 +3414,9 @@ export interface NotificationsSettings {
 		richFinal: {
 			enabled: boolean;
 			topicId: string | undefined;
+		};
+		richDraft: {
+			enabled: boolean;
 		};
 	};
 	discord: {
