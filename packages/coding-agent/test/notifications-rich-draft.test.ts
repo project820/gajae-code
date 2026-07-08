@@ -478,8 +478,11 @@ describe("daemon draft streaming (opt-in, off by default)", () => {
 		expect(findMethod(bot, "sendRichMessageDraft")!.body.draft_id).toBe(1); // first recorded draft id
 		expect(bot.calls.filter((c) => c.method === "sendRichMessageDraft").at(-1)!.body.draft_id).toBe(2);
 
-		// Every live frame still produced its own HTML send (additive, unthrottled).
-		expect(countMethod(bot, "sendMessage")).toBe(4);
+		// Draft streaming is additive to the unchanged HTML live path: under
+		// upstream's editable streaming the first live frame sends and the rest
+		// edit it in place, so 4 live frames = 1 sendMessage + 3 editMessageText.
+		expect(countMethod(bot, "sendMessage")).toBe(1);
+		expect(countMethod(bot, "editMessageText")).toBe(3);
 	});
 
 	test("a finalized frame resets the draft window so the next live frame drafts immediately", async () => {

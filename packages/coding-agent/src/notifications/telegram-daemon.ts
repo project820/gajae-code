@@ -1973,7 +1973,6 @@ export class TelegramNotificationDaemon {
 							}
 						}
 					}
-					}
 				}
 			} catch {
 				// Best-effort: a failed send/edit must never stop the daemon.

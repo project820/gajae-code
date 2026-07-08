@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../src/config/settings";
-import { markdownToTelegramHtml, splitTelegramHtml } from "../src/notifications/html-format";
+import { markdownToTelegramHtml, splitTelegramHtml, TELEGRAM_MESSAGE_LIMIT, TELEGRAM_PARSE_MODE } from "../src/notifications/html-format";
 import {
 	acquireDaemonOwnership,
 	DAEMON_VERSION,
@@ -18,12 +18,6 @@ import {
 	TelegramUpdatePoller,
 } from "../src/notifications/telegram-daemon";
 import { runDaemonInternal, runDaemonSmoke } from "../src/notifications/telegram-daemon-cli";
-import {
-	markdownToTelegramHtml,
-	splitTelegramHtml,
-	TELEGRAM_MESSAGE_LIMIT,
-	TELEGRAM_PARSE_MODE,
-} from "../src/notifications/html-format";
 import { deliverRichWithFallback } from "../src/notifications/rich-render";
 
 function tempAgentDir(): string {
@@ -2836,6 +2830,7 @@ test("a long finalized turn is scheduled through the pool, not burst in one gran
 	});
 	const rest = bot.calls.filter(c => c.method === "sendMessage").map(c => c.body.text);
 	expect(rest).toEqual([...expectedChunks.slice(1), markdownToTelegramHtml("tail")]);
+});
 // ---------------------------------------------------------------------------
 // Rev 3 rich final-answer promotion verification (Slice 1). Proves that the
 // off state is byte-identical (transport golden + daemon HTML body), documents
@@ -3228,8 +3223,12 @@ describe("telegram daemon rich final-answer promotion (Rev 3 verification)", () 
 		await driveFinalizedTurn(daemon, bot, richSession(), raw);
 		expect(countMethod(bot, "sendRichMessage")).toBe(0);
 		const sends = bot.calls.filter(c => c.method === "sendMessage");
-		expect(sends).toHaveLength(chunks.length);
-		expect(sends.map(c => c.body.text)).toEqual(chunks);
+		// Off state uses the unchanged HTML path. Upstream fans the split across
+		// pool drains (first chunk now, the rest re-queued), so this flush leads
+		// with chunk[0]; the full multi-chunk drain is covered by the pool test
+		// above. The point here: no rich promotion, and chunks stay limit-bounded.
+		expect(sends.length).toBeGreaterThanOrEqual(1);
+		expect(sends[0]!.body.text).toBe(chunks[0]);
 		expect(sends.every(c => c.body.text.length <= TELEGRAM_MESSAGE_LIMIT)).toBe(true);
 	});
 });
