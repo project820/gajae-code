@@ -2738,7 +2738,15 @@ export class TelegramNotificationDaemon {
 					break;
 				await this.runScan();
 				if (await this.controlStopRequested()) break;
-				const idleElapsed = this.runtime.now() - idleSince >= (this.opts.idleTimeoutMs ?? 60_000);
+				// Hold idle-exit for one extra grace window while orphan-topic
+				// candidates are pending, so the reaper can delete the topics of
+				// sessions that died without session_closed before the owner
+				// exits. Bounded: even when Telegram keeps refusing the delete,
+				// the daemon exits after idleTimeout + grace and the next owner
+				// run retries the reap from the persisted registry.
+				const idleTimeoutMs =
+					(this.opts.idleTimeoutMs ?? 60_000) + (this.orphanTopicSince.size > 0 ? ORPHAN_TOPIC_GRACE_MS : 0);
+				const idleElapsed = this.runtime.now() - idleSince >= idleTimeoutMs;
 				if (this.sessions.size > 0) {
 					idleSince = this.runtime.now();
 				} else if (idleElapsed) {

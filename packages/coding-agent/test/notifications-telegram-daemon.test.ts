@@ -4190,4 +4190,155 @@ describe("telegram daemon orphan topic reaping", () => {
 		await daemon.scanRoots();
 		expect(bot.calls.some(c => c.method === "deleteForumTopic")).toBe(true);
 	});
+
+	test("a refused delete retries after a fresh grace window instead of every scan", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		await registerNotificationRoot({ settings: s, cwd: path.join(agentDir, "repo"), sessionId: "S" });
+		seedTopics(agentDir, "S", "782");
+		let now = 0;
+		class RefusingBot extends FakeBotApi {
+			refuse = true;
+			override async call(method: string, body: unknown): Promise<unknown> {
+				if (method === "deleteForumTopic" && this.refuse) {
+					this.calls.push({ method, body });
+					return { ok: false };
+				}
+				return super.call(method, body);
+			}
+		}
+		const bot = new RefusingBot();
+		const deletes = () => bot.calls.filter(c => c.method === "deleteForumTopic").length;
+		const daemon = reapDaemon(s, bot, () => now);
+		await daemon.loadTopics();
+
+		await daemon.scanRoots(); // mark at t=0
+		now = GRACE + 1;
+		await daemon.scanRoots(); // attempt 1: refused, record kept, mark reset
+		expect(deletes()).toBe(1);
+
+		now += 1;
+		await daemon.scanRoots(); // next tick: must NOT retry inside the fresh window
+		expect(deletes()).toBe(1);
+
+		now += GRACE + 1;
+		await daemon.scanRoots(); // attempt 2 after a full fresh window
+		expect(deletes()).toBe(2);
+
+		bot.refuse = false;
+		now += GRACE + 1;
+		await daemon.scanRoots(); // attempt 3 succeeds and clears the record
+		expect(deletes()).toBe(3);
+		const topicsFile = path.join(daemonPaths(agentDir).dir, "telegram-topics.json");
+		expect(fs.readFileSync(topicsFile, "utf8").includes('"S"')).toBe(false);
+	});
+
+	test("a tombstoned but live endpoint still protects its topic from reaping", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		const cwd = path.join(agentDir, "repo");
+		await registerNotificationRoot({ settings: s, cwd, sessionId: "S" });
+		const endpointDir = path.join(cwd, ".gjc", "state", "notifications");
+		fs.mkdirSync(endpointDir, { recursive: true });
+		fs.writeFileSync(path.join(endpointDir, "S.json"), JSON.stringify({ url: "ws://live", token: "t", pid: 4242 }));
+		let now = 0;
+		const bot = new FakeBotApi();
+		const daemon = reapDaemon(s, bot, () => now, pid => pid === 4242);
+
+		// Connect, create the topic, then close cleanly: this tombstones the
+		// endpoint generation while the endpoint file (live PID) stays on disk.
+		await daemon.scanRoots();
+		FakeWs.instances[0]!.dispatchEvent(new Event("open"));
+		for (let i = 0; i < 20 && !bot.calls.some(c => c.method === "createForumTopic"); i++) {
+			await new Promise(resolve => setTimeout(resolve, 1));
+		}
+		await daemon.handleSessionMessage(daemon.sessions.get("S")!, { type: "session_closed", sessionId: "S" });
+		expect(daemon.sessions.has("S")).toBe(false);
+
+		// A topic record reappears (e.g. persisted by a prior daemon run).
+		seedTopics(agentDir, "S", "783");
+		await daemon.loadTopics();
+		bot.calls = [];
+
+		// The tombstone skips reconnect, but the live endpoint must still count
+		// as live for the reaper (liveness is recorded before the tombstone check).
+		await daemon.scanRoots();
+		now = GRACE + 1;
+		await daemon.scanRoots();
+		expect(daemon.sessions.has("S")).toBe(false); // tombstone kept reconnect off
+		expect(bot.calls.some(c => c.method === "deleteForumTopic")).toBe(false);
+	});
+
+	test("idle-exit is held one grace window so pending orphan topics are reaped before the owner exits", async () => {
+		FakeWs.instances = [];
+		const agentDir = tempAgentDir();
+		const s = setPrivateAgentDir(settings(agentDir), agentDir);
+		await acquireDaemonOwnership({
+			settings: s,
+			tokenFingerprint: "fp",
+			chatId: "42",
+			pid: process.pid,
+			randomId: () => "owner",
+		});
+		await registerNotificationRoot({ settings: s, cwd: path.join(agentDir, "repo"), sessionId: "S" });
+		seedTopics(agentDir, "S", "784");
+		let now = 0;
+		const inner = new FakeBotApi();
+		const bot = {
+			get calls() {
+				return inner.calls;
+			},
+			async call(method: string, body: unknown): Promise<unknown> {
+				if (method === "getUpdates") {
+					inner.calls.push({ method, body });
+					// Slow the loop down instead of hot-spinning on instant polls.
+					await new Promise(resolve => setTimeout(resolve, 5));
+					return { ok: true, result: [] };
+				}
+				return inner.call(method, body);
+			},
+		};
+		const daemon = new TelegramNotificationDaemon({
+			settings: s,
+			ownerId: "owner",
+			botToken: "tok",
+			chatId: "42",
+			botApi: bot,
+			WebSocketImpl: FakeWs as any,
+			pidAlive: () => false,
+			now: () => now,
+			scanIntervalMs: 5,
+			idleTimeoutMs: 1_000,
+			createLifecycleControlServer: null,
+		});
+		const until = async (pred: () => boolean, ms = 5000) => {
+			const start = Date.now();
+			while (!pred()) {
+				if (Date.now() - start > ms) throw new Error("condition not met in time");
+				await new Promise(r => setTimeout(r, 5));
+			}
+		};
+
+		let finished = false;
+		const runPromise = daemon.run().then(() => {
+			finished = true;
+		});
+		await until(() => inner.calls.some(c => c.method === "getUpdates") || finished);
+
+		// Past the base idle timeout but inside the orphan grace window: the
+		// pending mark must hold the daemon open instead of idle-exiting.
+		now = 5_000;
+		await new Promise(r => setTimeout(r, 60));
+		expect(finished).toBe(false);
+		expect(inner.calls.some(c => c.method === "deleteForumTopic")).toBe(false);
+
+		// Past mark + grace: the reap fires, then the (no longer held) idle
+		// window lets the owner exit.
+		now = GRACE + 5_000;
+		await until(() => inner.calls.some(c => c.method === "deleteForumTopic"));
+		await until(() => finished);
+		await runPromise;
+	});
 });
